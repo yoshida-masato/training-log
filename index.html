@@ -33,15 +33,18 @@
       font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
       font-size: 16px;
       line-height: 1.4;
-      overscroll-behavior-y: none;
+      overscroll-behavior: none;
       -webkit-user-select: none;
       user-select: none;
+      height: 100%;
+      overflow: hidden; /* body自体はスクロールさせない（フッターのガタつき防止） */
     }
-    #app { padding-bottom: calc(64px + var(--safe-bottom)); min-height: 100%; }
+    /* ヘッダー／本文スクロール／フッター の3段flex。position:fixed をやめて iOS のガタつきを解消 */
+    #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
     /* Header */
     header {
-      position: sticky; top: 0; z-index: 20;
+      flex: 0 0 auto; z-index: 20;
       background: rgba(15,18,22,0.92);
       backdrop-filter: blur(8px);
       padding: calc(var(--safe-top) + 10px) 14px 10px;
@@ -71,7 +74,7 @@
     .chip.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
 
     /* List */
-    main { padding: 10px 14px; }
+    main { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px calc(16px + var(--safe-bottom)); }
     .cat-head { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; margin: 16px 2px 6px; }
     .ex {
       background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
@@ -91,7 +94,7 @@
 
     /* Bottom nav */
     nav {
-      position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+      flex: 0 0 auto; z-index: 20;
       background: rgba(15,18,22,0.95); backdrop-filter: blur(8px);
       border-top: 1px solid var(--line);
       display: flex; padding-bottom: var(--safe-bottom);

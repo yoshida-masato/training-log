@@ -434,12 +434,22 @@ function renderData() {
       <textarea id="imp-text" placeholder="ここに貼り付け…"></textarea></div>
     <div class="field"><input type="file" id="imp-file" accept=".tsv,.csv,text/tab-separated-values,text/csv,text/plain"></div>
     <div class="row2">
-      <div class="field"><label>左端列の年（最古の列）</label><input id="imp-year" type="number" value="${new Date().getFullYear() - 5}" inputmode="numeric"></div>
-      <div class="field"><label>&nbsp;</label><button class="secondary" id="imp-preview" style="width:100%">プレビュー</button></div>
+      <div class="field"><label>部位の列 (A=1)</label><input id="imp-catcol" type="number" inputmode="numeric" value="1" min="1"></div>
+      <div class="field"><label>種目名の列 (B=2)</label><input id="imp-namecol" type="number" inputmode="numeric" value="2" min="1"></div>
     </div>
+    <div class="row2">
+      <div class="field"><label>日付の行 (1)</label><input id="imp-daterow" type="number" inputmode="numeric" value="1" min="1"></div>
+      <div class="field"><label>場所の行 (2)</label><input id="imp-locrow" type="number" inputmode="numeric" value="2" min="1"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>データ開始行 (3)</label><input id="imp-startrow" type="number" inputmode="numeric" value="3" min="1"></div>
+      <div class="field"><label>左端(最古)列の年</label><input id="imp-year" type="number" value="${new Date().getFullYear() - 5}" inputmode="numeric"></div>
+    </div>
+    <button class="secondary" id="imp-preview" style="width:100%">プレビュー</button>
     <div id="imp-result"></div>
-    <div class="hint">スプレッドシート形式：1行目=日付(例 7/2(木))、2行目=場所、A列=部位、B列=種目名、各セルは改行区切りで「重量,レップ,セット」。<br>
-      年は列に書かれていないため、左端(最古)の列の年を指定し、月がリセットされるたびに翌年へ繰り上げて推定します。プレビューで期間を確認してから取り込んでください。</div>
+    <div class="hint">既定値はあなたの形式（A列=部位, B列=種目名, 1行目=日付, 2行目=場所, 3行目からデータ）に合わせてあります。ズレる時だけ数値を変えて再プレビュー。<br>
+      見出しが日付でも中身が種目名の列は日付列から自動除外します（種目名列に日付が混ざっても誤爆しません）。<br>
+      年は列に書かれていないため、左端(最古)列の年を起点に、月がリセットされるたびに翌年へ繰り上げて推定します。<b>プレビューの「種目名の例」と期間を必ず確認</b>してから取り込んでください。</div>
   </div>`);
   main.appendChild(imp);
   $('imp-file').onchange = (e) => { const f = e.target.files[0]; if (f) f.text().then((t) => { $('imp-text').value = t; toast('読み込みました。プレビューを押してください'); }); };
@@ -542,68 +552,87 @@ function parseSetCell(cell) {
   }).filter(Boolean);
 }
 
+function isSetCellText(s) { return /^\s*-?\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+/.test((s || '').split(/[\n\r]+/)[0] || ''); }
 let _pendingImport = null;
 function previewGridImport() {
   const text = $('imp-text').value;
   const resultEl = $('imp-result'); resultEl.innerHTML = '';
   if (!text.trim()) { toast('データを貼り付けてください'); return; }
   const grid = parseDelimited(text);
-  if (grid.length < 3) { toast('行が足りません'); return; }
-  // ヘッダー行検出: 最初にDATE_REを多く含む行を日付行とする（通常0行目）
-  let dateRowIdx = 0, bestCount = -1;
-  for (let r = 0; r < Math.min(3, grid.length); r++) {
-    const cnt = grid[r].filter((c) => DATE_RE.test(c || '')).length;
-    if (cnt > bestCount) { bestCount = cnt; dateRowIdx = r; }
-  }
-  const locRowIdx = dateRowIdx + 1;
-  // データ列 = 日付行で日付として解釈できる列
-  const dateRow = grid[dateRowIdx];
-  const dataCols = [];
-  for (let c = 0; c < dateRow.length; c++) { const m = (dateRow[c] || '').match(DATE_RE); if (m) dataCols.push({ col: c, m: [parseInt(m[1], 10), parseInt(m[2], 10)] }); }
-  if (!dataCols.length) { resultEl.innerHTML = `<div class="hint" style="color:var(--danger)">日付列を検出できませんでした。1行目に 7/2(木) のような日付が並んでいるか確認してください。</div>`; return; }
-  const firstDataCol = dataCols[0].col;
-  // ラベル列: データ列より左の列。2列あれば[部位,名前]、1列なら[名前]
-  const labelCols = [];
-  for (let c = 0; c < firstDataCol; c++) labelCols.push(c);
-  const catCol = labelCols.length >= 2 ? labelCols[labelCols.length - 2] : -1;
-  const nameCol = labelCols.length >= 1 ? labelCols[labelCols.length - 1] : 0;
+  if (grid.length < 2) { toast('行が足りません'); return; }
 
-  // 年推定: 左端(最古)の年から、月がリセット(m<=前のm)するたびに+1
+  // 手動指定（1始まり）→ 0始まりへ。未入力/不正は自動フォールバック。
+  const to0 = (id, dflt) => { const v = parseInt(($(id) || {}).value, 10); return Number.isFinite(v) && v >= 1 ? v - 1 : dflt; };
+  const dateRowIdx = to0('imp-daterow', 0);
+  const locRowIdx = to0('imp-locrow', dateRowIdx + 1);
+  const dataStart = to0('imp-startrow', locRowIdx + 1);
+  const catCol = to0('imp-catcol', -1);
+  const nameCol = to0('imp-namecol', 0);
+  if (nameCol === catCol) { resultEl.innerHTML = `<div class="hint" style="color:var(--danger)">部位の列と種目名の列が同じです。別々にしてください。</div>`; return; }
+  const dateRow = grid[dateRowIdx] || [];
+  const locRow = grid[locRowIdx] || [];
+
+  // セッション列 = 見出しが日付 かつ ラベル列(部位/種目名)ではない。
+  // さらに、データ部が「文字だけ（種目名）」の列は見出しが日付でも除外（誤爆防止）。
+  const dataCols = [];
+  for (let c = 0; c < dateRow.length; c++) {
+    if (c === catCol || c === nameCol) continue;
+    const m = (dateRow[c] || '').match(DATE_RE);
+    if (!m) continue;
+    let setLike = 0, textLike = 0;
+    for (let r = dataStart; r < grid.length; r++) {
+      const cell = (grid[r] && grid[r][c] || '').trim(); if (!cell) continue;
+      if (isSetCellText(cell)) setLike++; else textLike++;
+    }
+    if (textLike > setLike && setLike === 0) continue; // 中身が種目名などの列は日付列にしない
+    dataCols.push({ col: c, m: [parseInt(m[1], 10), parseInt(m[2], 10)] });
+  }
+  if (!dataCols.length) { resultEl.innerHTML = `<div class="hint" style="color:var(--danger)">日付列を検出できませんでした。「日付の行」が正しいか、1行目に 7/2(木) のような日付が並んでいるか確認してください。</div>`; return; }
+
+  // 年推定: 左端(最古)の年から、月がリセット(m<前のm)するたびに+1
   let year = parseInt($('imp-year').value, 10) || (new Date().getFullYear() - 5);
   let prevM = -1;
   const colDate = {};
   dataCols.forEach((dc) => { const [m, d] = dc.m; if (prevM !== -1 && m < prevM) year++; prevM = m; colDate[dc.col] = `${year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`; });
 
-  // 集計
-  const dataStart = locRowIdx + 1;
-  const exNames = new Set(); let logCount = 0, setCount = 0;
+  // 集計。部位(カテゴリ)は結合セル対策で空欄なら直前の値を継承（前方補完）。
+  const exNames = []; const catByName = {}; let logCount = 0, setCount = 0;
   const parsed = { sessions: [], entries: [] };
-  dataCols.forEach((dc) => parsed.sessions.push({ col: dc.col, date: colDate[dc.col], location: (grid[locRowIdx] && grid[locRowIdx][dc.col] || '').trim() }));
+  dataCols.forEach((dc) => parsed.sessions.push({ col: dc.col, date: colDate[dc.col], location: (locRow[dc.col] || '').trim() }));
+  let lastCat = '';
   for (let r = dataStart; r < grid.length; r++) {
-    const name = (grid[r][nameCol] || '').trim(); if (!name) continue;
-    const cat = catCol >= 0 ? (grid[r][catCol] || '').trim() : '';
-    exNames.add(name);
+    const row = grid[r] || [];
+    const rawCat = catCol >= 0 ? (row[catCol] || '').trim() : '';
+    if (rawCat) lastCat = rawCat;
+    const cat = rawCat || lastCat;
+    const name = (row[nameCol] || '').trim(); if (!name) continue;
+    if (!(name in catByName)) { exNames.push(name); catByName[name] = cat; }
     dataCols.forEach((dc) => {
-      const sets = parseSetCell(grid[r][dc.col] || '');
-      if (sets.length) { parsed.entries.push({ name, cat, date: colDate[dc.col], location: (grid[locRowIdx] && grid[locRowIdx][dc.col] || '').trim(), sets }); logCount++; setCount += totalSetCount(sets); }
+      const sets = parseSetCell(row[dc.col] || '');
+      if (sets.length) { parsed.entries.push({ name, cat: catByName[name] || cat, date: colDate[dc.col], location: (locRow[dc.col] || '').trim(), sets }); logCount++; setCount += totalSetCount(sets); }
     });
   }
   const dates = parsed.sessions.map((s) => s.date).sort();
+  const catCount = new Set(exNames.map((n) => catByName[n] || 'その他')).size;
+  const sample = exNames.slice(0, 8).map((n) => `${catByName[n] || 'その他'} / ${n}`);
   _pendingImport = parsed;
   resultEl.innerHTML = '';
   resultEl.appendChild(h(`<div class="prev-panel">
-    <div class="label">プレビュー</div>
-    <div class="prev-line">種目: ${exNames.size}</div>
-    <div class="prev-line">日付列: ${dataCols.length}（${labelCols.length >= 2 ? '部位+種目名' : '種目名のみ'}）</div>
-    <div class="prev-line">記録: ${logCount}（合計 ${setCount} セット）</div>
+    <div class="label">プレビュー（取り込む前に確認）</div>
+    <div class="prev-line">種目: ${exNames.length}　部位: ${catCount}</div>
+    <div class="prev-line">日付列: ${dataCols.length}　記録: ${logCount}（合計 ${setCount} セット）</div>
     <div class="prev-line">期間: ${dates.length ? fmtDateFull(dates[0]) + ' 〜 ' + fmtDateFull(dates[dates.length - 1]) : '-'}</div>
+    <div class="label" style="margin-top:8px">種目名の例（部位 / 種目名）</div>
+    ${sample.map((s) => `<div class="prev-line">${esc(s)}</div>`).join('') || '<div class="prev-line">-</div>'}
   </div>`));
-  const btn = h(`<button class="primary" id="imp-commit" style="width:100%">この内容で取り込む</button>`);
-  resultEl.appendChild(btn);
-  btn.onclick = commitGridImport;
+  const badName = exNames.length <= 12 && exNames.every((n) => n.length <= 2);
+  if (badName) resultEl.appendChild(h(`<div class="hint" style="color:var(--danger)">種目名が部位名(胸/背 等)ばかりのようです。列指定が逆かも。「部位の列」「種目名の列」を確認して再プレビューしてください。</div>`));
   if (dates.length && (dates[0] < '1990' || dates[dates.length - 1] > String(new Date().getFullYear() + 1))) {
     resultEl.appendChild(h(`<div class="hint" style="color:var(--danger)">期間が不自然です。左端列の年を調整して再プレビューしてください。</div>`));
   }
+  const btn = h(`<button class="primary" id="imp-commit" style="width:100%;margin-top:8px">この内容で取り込む</button>`);
+  resultEl.appendChild(btn);
+  btn.onclick = commitGridImport;
 }
 async function commitGridImport() {
   if (!_pendingImport) return;
