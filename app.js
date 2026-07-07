@@ -88,9 +88,22 @@ function logsOfExercise(exerciseId) {
     .filter((x) => x.session)
     .sort((a, b) => (a.session.date < b.session.date ? 1 : -1)); // 新しい順
 }
-// 現在セッションを除いた直近の記録（前回）
-function previousLogs(exerciseId, currentSessionId, limit) {
-  return logsOfExercise(exerciseId).filter((x) => x.log.sessionId !== currentSessionId).slice(0, limit || 2);
+// 現在セッションを除いた直近の記録（前回）。beforeDate 指定時はその日付より前に限定（過去日を見るとき用）
+function previousLogs(exerciseId, currentSessionId, limit, beforeDate) {
+  return logsOfExercise(exerciseId)
+    .filter((x) => x.log.sessionId !== currentSessionId && (!beforeDate || x.session.date < beforeDate))
+    .slice(0, limit || 2);
+}
+function sessionsOn(date) { return DB.sessions.filter((s) => s.date === date); }
+// その日(場所問わず)にある記録: exerciseId -> log。preferSessId のセッションの記録を優先。
+function dayLogMap(date, preferSessId) {
+  const ids = new Set(sessionsOn(date).map((s) => s.id));
+  const map = new Map();
+  DB.logs.forEach((l) => {
+    if (!ids.has(l.sessionId) || !l.sets || !l.sets.length) return;
+    if (!map.has(l.exerciseId) || l.sessionId === preferSessId) map.set(l.exerciseId, l);
+  });
+  return map;
 }
 async function saveLog(exerciseId, sessionId, sets) {
   let l = logFor(exerciseId, sessionId);
@@ -176,9 +189,22 @@ function tabTitle() { return { exercises: '種目の管理', data: 'データ', 
 function pickDate() {
   const inp = h(`<input type="date" value="${esc(state.date)}" style="position:fixed;opacity:0;pointer-events:none">`);
   document.body.appendChild(inp);
-  inp.onchange = () => { if (inp.value) { state.date = inp.value; render(); } inp.remove(); };
+  inp.onchange = () => { if (inp.value) setDate(inp.value); inp.remove(); };
   inp.onblur = () => setTimeout(() => inp.remove(), 200);
   inp.focus(); inp.click(); if (inp.showPicker) try { inp.showPicker(); } catch (e) {}
+}
+// 日付変更。その日に既存セッションがあれば場所も自動で合わせる（過去日の見直しが1タップで済む）
+function setDate(d) {
+  state.date = d;
+  if (!findSession(d, state.location)) {
+    const ses = sessionsOn(d);
+    if (ses.length) {
+      const best = ses.map((s) => ({ s, n: DB.logs.filter((l) => l.sessionId === s.id && l.sets && l.sets.length).length }))
+        .sort((a, b) => b.n - a.n)[0];
+      state.location = best.s.location || '';
+    }
+  }
+  render();
 }
 
 function renderHome() { renderHomeList(); }
@@ -196,23 +222,38 @@ function renderHomeList() {
     return;
   }
   main.innerHTML = '';
-  let curCat = null;
-  list.forEach((e) => {
-    const cat = e.category || 'その他';
-    if (!q && cat !== curCat) { curCat = cat; main.appendChild(h(`<div class="cat-head">${esc(cat)}</div>`)); }
-    const todayLog = sessId ? logFor(e.id, sessId) : null;
-    const prev = previousLogs(e.id, sessId, 1)[0];
-    const done = todayLog && todayLog.sets.length;
-    const row = h(`<div class="ex ${done ? 'done' : ''}">
+
+  // その日に記録がある種目を先頭グループへ（日付を変えるとその日やった種目が上に並ぶ）
+  const dayMap = dayLogMap(state.date, sessId);
+  const doneList = list.filter((e) => dayMap.has(e.id));
+  const restList = list.filter((e) => !dayMap.has(e.id));
+  doneList.sort((a, b) => ((dayMap.get(a.id).updatedAt || 0) - (dayMap.get(b.id).updatedAt || 0)) || byOrder(a, b));
+  const dayLabel = state.date === todayStr() ? '今日' : 'この日';
+
+  const makeRow = (e, todayLog) => {
+    const prev = previousLogs(e.id, todayLog ? todayLog.sessionId : sessId, 1, state.date)[0];
+    const has = todayLog && todayLog.sets.length;
+    const row = h(`<div class="ex ${has ? 'done' : ''}">
         <div class="info">
           <div class="name">${esc(e.name)}</div>
           ${prev ? `<div class="sub">前回 ${esc(fmtDate(prev.session.date))}: ${esc(summarizeSets(prev.log.sets))}</div>` : `<div class="sub">記録なし</div>`}
-          ${done ? `<div class="today">今日: ${esc(summarizeSets(todayLog.sets))}</div>` : ''}
+          ${has ? `<div class="today">${dayLabel}: ${esc(summarizeSets(todayLog.sets))}</div>` : ''}
         </div>
-        ${done ? `<div class="badge">${totalSetCount(todayLog.sets)}</div>` : ''}
+        ${has ? `<div class="badge">${totalSetCount(todayLog.sets)}</div>` : ''}
       </div>`);
     row.onclick = () => openLog(e);
-    main.appendChild(row);
+    return row;
+  };
+
+  if (doneList.length) {
+    main.appendChild(h(`<div class="cat-head" style="color:var(--accent)">✅ ${dayLabel}やった種目（${doneList.length}）</div>`));
+    doneList.forEach((e) => main.appendChild(makeRow(e, dayMap.get(e.id))));
+  }
+  let curCat = null;
+  restList.forEach((e) => {
+    const cat = e.category || 'その他';
+    if (!q && cat !== curCat) { curCat = cat; main.appendChild(h(`<div class="cat-head">${esc(cat)}</div>`)); }
+    main.appendChild(makeRow(e, null));
   });
 }
 
@@ -226,10 +267,16 @@ function openSheet(title, bodyEl) {
 function closeSheet() { $('sheet-backdrop').classList.remove('open'); sheet.open = false; }
 
 async function openLog(ex) {
-  const sess = await getOrCreateSession(state.date, state.location);
-  const existing = logFor(ex.id, sess.id);
+  let sess = findSession(state.date, state.location);
+  let existing = sess ? logFor(ex.id, sess.id) : null;
+  if (!existing) {
+    // 同じ日付の別セッション(場所違い)に記録があればそれを編集対象にする（二重セッション防止）
+    const alt = dayLogMap(state.date, sess ? sess.id : null).get(ex.id);
+    if (alt) { existing = alt; sess = DB.sessions.find((s) => s.id === alt.sessionId) || sess; }
+  }
+  if (!sess) sess = await getOrCreateSession(state.date, state.location);
   let sets = existing ? existing.sets.map((s) => ({ ...s })) : [];
-  const prev = previousLogs(ex.id, sess.id, 3);
+  const prev = previousLogs(ex.id, sess.id, 3, state.date);
   // steppers 初期値: 今日の最終セット → 前回の最初のセット → 既定
   const seed = sets.length ? sets[sets.length - 1] : (prev[0] ? prev[0].log.sets[0] : { w: 20, r: 10, s: 1 });
   const cur = { w: seed.w, r: seed.r, s: 1 };
