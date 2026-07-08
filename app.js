@@ -72,6 +72,15 @@ function fmtDate(str) {
   return `${m}/${d}(${wd})`;
 }
 function fmtDateFull(str) { const [y, m, d] = str.split('-').map(Number); return `${y}/${m}/${d}`; }
+function tsToDateStr(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function addDays(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const t = new Date(y, m - 1, d + n);
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+}
 
 /* ---------- Data access ---------- */
 function sessionKey(date, location) { return date + ' ' + (location || ''); }
@@ -88,10 +97,14 @@ function logsOfExercise(exerciseId) {
     .filter((x) => x.session)
     .sort((a, b) => (a.session.date < b.session.date ? 1 : -1)); // 新しい順
 }
-// 現在セッションを除いた直近の記録（前回）。beforeDate 指定時はその日付より前に限定（過去日を見るとき用）
+// 現在セッションを除いた直近の記録（前回）。beforeDate(=表示中の日付) のセッションは除外。
+// 過去日を見ている時はそれより前の記録のみ。今日を見ている時は、日付が未来にズレた記録
+// （データ不整合）も隠さず「前回」に出す — 隠すと最新の記録がどこにも表示されなくなるため。
 function previousLogs(exerciseId, currentSessionId, limit, beforeDate) {
+  const pastView = beforeDate && beforeDate < todayStr();
   return logsOfExercise(exerciseId)
-    .filter((x) => x.log.sessionId !== currentSessionId && (!beforeDate || x.session.date < beforeDate))
+    .filter((x) => x.log.sessionId !== currentSessionId
+      && (!beforeDate || (pastView ? x.session.date < beforeDate : x.session.date !== beforeDate)))
     .slice(0, limit || 2);
 }
 function sessionsOn(date) { return DB.sessions.filter((s) => s.date === date); }
@@ -222,6 +235,20 @@ function renderHomeList() {
     return;
   }
   main.innerHTML = '';
+
+  if (backupDue()) {
+    const b = h(`<div class="prev-panel" style="display:flex;align-items:center;gap:10px">
+      <div style="flex:1;font-size:13.5px">バックアップしていない記録があります。<span style="color:var(--muted)">iCloud Driveへの保存を推奨。</span></div>
+      <button class="chip active" id="bk-go">今すぐ</button><button class="chip" id="bk-later">後で</button>
+    </div>`);
+    b.querySelector('#bk-go').onclick = () => { state.tab = 'data'; render(); };
+    b.querySelector('#bk-later').onclick = async () => {
+      state.backupSnoozeUntil = Date.now() + 7 * 86400e3;
+      await metaSet('backupSnoozeUntil', state.backupSnoozeUntil);
+      renderHomeList();
+    };
+    main.appendChild(b);
+  }
 
   // その日に記録がある種目を先頭グループへ（日付を変えるとその日やった種目が上に並ぶ）
   const dayMap = dayLogMap(state.date, sessId);
@@ -461,14 +488,23 @@ function renderHistory() {
 function renderData() {
   const main = $('main'); main.innerHTML = '';
   const stats = h(`<div class="prev-panel"><div class="label">現在のデータ</div>
-    <div class="prev-line">種目 ${DB.exercises.length} · セッション ${DB.sessions.length} · 記録 ${DB.logs.length}</div></div>`);
+    <div class="prev-line">種目 ${DB.exercises.length} · セッション ${DB.sessions.length} · 記録 ${DB.logs.length}</div>
+    <div class="prev-line">最終バックアップ: ${state.lastBackupAt ? esc(fmtDateFull(tsToDateStr(state.lastBackupAt))) : 'まだ一度もしていません'}</div>
+    <div class="prev-line" id="storage-line" style="color:var(--muted)">保存領域: 確認中…</div></div>`);
   main.appendChild(stats);
+  if (navigator.storage && navigator.storage.persisted) {
+    navigator.storage.persisted().then((p) => {
+      const el = $('storage-line');
+      if (el) el.textContent = p ? '保存領域: 保護あり（persist許可済み）' : '保存領域: 保護なし（容量不足時にOSが削除する可能性）';
+    }).catch(() => {});
+  } else { const el = $('storage-line'); if (el) el.textContent = '保存領域: 状態不明'; }
 
   main.appendChild(h(`<div class="cat-head">バックアップ</div>`));
   const exp = h(`<div>
     <button class="ghost" id="exp-json" style="margin-bottom:8px">JSONで書き出し（バックアップ）</button>
     <button class="ghost" id="exp-tsv" style="margin-bottom:8px">TSVで書き出し（スプレッドシート形式）</button>
     <div class="field"><label>JSONから復元 / 取り込み（マージ）</label><input type="file" id="imp-json" accept="application/json,.json"></div>
+    <div class="hint">iCloudに残すには:「JSONで書き出し」→共有シートの<b>「"ファイル"に保存」→iCloud Drive</b>を選択。ホーム画面からアプリを削除すると記録も一緒に消えるため、定期的なバックアップを推奨します。</div>
   </div>`);
   main.appendChild(exp);
   $('exp-json').onclick = exportJSON;
@@ -502,6 +538,37 @@ function renderData() {
   $('imp-file').onchange = (e) => { const f = e.target.files[0]; if (f) f.text().then((t) => { $('imp-text').value = t; toast('読み込みました。プレビューを押してください'); }); };
   $('imp-preview').onclick = () => previewGridImport();
 
+  main.appendChild(h(`<div class="cat-head">セッション診断</div>`));
+  const today = todayStr();
+  const sesSorted = DB.sessions.slice().sort((a, b) => (a.date < b.date ? 1 : -1));
+  const diag = h(`<div class="prev-panel"><div class="label">保存されているセッション（新しい順・直近12件）。日付/曜日が実際と合っているか確認できます</div></div>`);
+  if (!sesSorted.length) diag.appendChild(h(`<div class="prev-line">セッションはありません</div>`));
+  sesSorted.slice(0, 12).forEach((s) => {
+    const n = DB.logs.filter((l) => l.sessionId === s.id && l.sets && l.sets.length).length;
+    const future = s.date > today;
+    diag.appendChild(h(`<div class="prev-line"${future ? ' style="color:var(--danger)"' : ''}>${esc(fmtDateFull(s.date))} ${esc(fmtDate(s.date))}${s.location ? ' · ' + esc(s.location) : ''} · ${n}種目${future ? ' ⚠️未来の日付' : ''}</div>`));
+  });
+  if (sesSorted.length > 12) diag.appendChild(h(`<div class="prev-line" style="color:var(--muted)">…ほか ${sesSorted.length - 12} 件</div>`));
+  main.appendChild(diag);
+
+  main.appendChild(h(`<div class="cat-head">日付の修正</div>`));
+  const oldest = sesSorted.length ? sesSorted[sesSorted.length - 1].date : today;
+  const newest = sesSorted.length ? sesSorted[0].date : today;
+  const shiftEl = h(`<div>
+    <div class="row2">
+      <div class="field"><label>開始日</label><input type="date" id="shift-from" value="${esc(oldest)}"></div>
+      <div class="field"><label>終了日</label><input type="date" id="shift-to" value="${esc(newest)}"></div>
+    </div>
+    <div class="row2">
+      <button class="secondary" id="shift-minus">期間を −1日</button>
+      <button class="secondary" id="shift-plus">期間を ＋1日</button>
+    </div>
+    <div class="hint">期間内のセッションの日付をまとめて1日ずらします（取り込んだ日付が1日ズレていた時の修正用）。実行前にJSONバックアップ推奨。</div>
+  </div>`);
+  main.appendChild(shiftEl);
+  $('shift-minus').onclick = () => shiftSessionDates($('shift-from').value, $('shift-to').value, -1);
+  $('shift-plus').onclick = () => shiftSessionDates($('shift-from').value, $('shift-to').value, 1);
+
   main.appendChild(h(`<div class="cat-head" style="color:var(--danger)">危険な操作</div>`));
   const dz = h(`<button class="secondary" id="wipe" style="color:var(--danger);border-color:var(--danger);width:100%">全データを削除</button>`);
   main.appendChild(dz);
@@ -513,16 +580,75 @@ function renderData() {
   };
 }
 
+// 期間内のセッション日付を delta 日ずらす。移動先に同じ(日付,場所)のセッションがあればログを併合。
+async function shiftSessionDates(from, to, delta) {
+  if (!from || !to || from > to) { toast('期間を正しく指定してください'); return; }
+  const targets = DB.sessions.filter((s) => s.date >= from && s.date <= to)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (!targets.length) { toast('期間内にセッションがありません'); return; }
+  if (!confirm(`${fmtDateFull(from)} 〜 ${fmtDateFull(to)} の ${targets.length} 件のセッションの日付を ${delta > 0 ? '+1' : '−1'}日 ずらします。よろしいですか？`)) return;
+  if (delta > 0) targets.reverse(); // 期間内どうしの衝突を避けるため、+1日は新しい方から処理
+  for (const s of targets) {
+    const nd = addDays(s.date, delta);
+    const dup = DB.sessions.find((x) => x !== s && x.date === nd && (x.location || '') === (s.location || ''));
+    if (dup) {
+      for (const l of DB.logs.filter((x) => x.sessionId === s.id)) {
+        const dupLog = logFor(l.exerciseId, dup.id);
+        if (dupLog) {
+          dupLog.sets = dupLog.sets.concat(l.sets); dupLog.updatedAt = Date.now();
+          await idbPut('logs', dupLog);
+          DB.logs = DB.logs.filter((x) => x.id !== l.id); await idbDelete('logs', l.id);
+        } else {
+          l.sessionId = dup.id; await idbPut('logs', l);
+        }
+      }
+      DB.sessions = DB.sessions.filter((x) => x.id !== s.id); await idbDelete('sessions', s.id);
+    } else {
+      s.date = nd; await idbPut('sessions', s);
+    }
+  }
+  toast('日付をずらしました');
+  renderData();
+}
+
 function download(filename, text, type) {
   const blob = new Blob([text], { type: type || 'text/plain' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click();
   setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 500);
 }
-function exportJSON() {
+async function markBackedUp() {
+  state.lastBackupAt = Date.now();
+  await metaSet('lastBackupAt', state.lastBackupAt);
+  if (state.tab === 'data') renderData();
+}
+async function exportJSON() {
   const data = { app: 'training-log', version: 1, exportedAt: new Date().toISOString(), exercises: DB.exercises, sessions: DB.sessions, logs: DB.logs };
-  download(`training-log-backup-${todayStr()}.json`, JSON.stringify(data), 'application/json');
+  const filename = `training-log-backup-${todayStr()}.json`;
+  const text = JSON.stringify(data);
+  // iOSでは共有シートの「"ファイル"に保存」→ iCloud Drive でiCloudにバックアップできる
+  if (navigator.share && navigator.canShare) {
+    const file = new File([text], filename, { type: 'application/json' });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+        toast('バックアップを書き出しました');
+        await markBackedUp();
+      } catch (err) { /* 共有キャンセル時は何もしない */ }
+      return;
+    }
+  }
+  download(filename, text, 'application/json');
   toast('JSONを書き出しました');
+  await markBackedUp();
+}
+// 新しい記録があるのに2週間以上バックアップしていない
+function backupDue() {
+  if (!DB.logs.length) return false;
+  if (Date.now() < (state.backupSnoozeUntil || 0)) return false;
+  const last = state.lastBackupAt || 0;
+  const newest = DB.logs.reduce((a, l) => Math.max(a, l.updatedAt || 0), 0);
+  return newest > last && Date.now() - last > 14 * 86400e3;
 }
 function exportTSV() {
   // 種目(行) × セッション(列) の wide 形式で再構成
@@ -744,6 +870,10 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheet.op
     _db = await openDB();
     await loadAll();
     state.location = await metaGet('lastLocation', '');
+    state.lastBackupAt = await metaGet('lastBackupAt', 0);
+    state.backupSnoozeUntil = await metaGet('backupSnoozeUntil', 0);
+    // OSの容量整理でIndexedDBが消されにくくなるよう保護を要求
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   } catch (err) {
     document.getElementById('main').innerHTML = '<div class="empty">起動に失敗しました: ' + esc(err.message) + '</div>';
     return;
