@@ -72,6 +72,10 @@ function fmtDate(str) {
   return `${m}/${d}(${wd})`;
 }
 function fmtDateFull(str) { const [y, m, d] = str.split('-').map(Number); return `${y}/${m}/${d}`; }
+function tsToDateStr(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 function addDays(dateStr, n) {
   const [y, m, d] = dateStr.split('-').map(Number);
   const t = new Date(y, m - 1, d + n);
@@ -231,6 +235,20 @@ function renderHomeList() {
     return;
   }
   main.innerHTML = '';
+
+  if (backupDue()) {
+    const b = h(`<div class="prev-panel" style="display:flex;align-items:center;gap:10px">
+      <div style="flex:1;font-size:13.5px">バックアップしていない記録があります。<span style="color:var(--muted)">iCloud Driveへの保存を推奨。</span></div>
+      <button class="chip active" id="bk-go">今すぐ</button><button class="chip" id="bk-later">後で</button>
+    </div>`);
+    b.querySelector('#bk-go').onclick = () => { state.tab = 'data'; render(); };
+    b.querySelector('#bk-later').onclick = async () => {
+      state.backupSnoozeUntil = Date.now() + 7 * 86400e3;
+      await metaSet('backupSnoozeUntil', state.backupSnoozeUntil);
+      renderHomeList();
+    };
+    main.appendChild(b);
+  }
 
   // その日に記録がある種目を先頭グループへ（日付を変えるとその日やった種目が上に並ぶ）
   const dayMap = dayLogMap(state.date, sessId);
@@ -470,14 +488,23 @@ function renderHistory() {
 function renderData() {
   const main = $('main'); main.innerHTML = '';
   const stats = h(`<div class="prev-panel"><div class="label">現在のデータ</div>
-    <div class="prev-line">種目 ${DB.exercises.length} · セッション ${DB.sessions.length} · 記録 ${DB.logs.length}</div></div>`);
+    <div class="prev-line">種目 ${DB.exercises.length} · セッション ${DB.sessions.length} · 記録 ${DB.logs.length}</div>
+    <div class="prev-line">最終バックアップ: ${state.lastBackupAt ? esc(fmtDateFull(tsToDateStr(state.lastBackupAt))) : 'まだ一度もしていません'}</div>
+    <div class="prev-line" id="storage-line" style="color:var(--muted)">保存領域: 確認中…</div></div>`);
   main.appendChild(stats);
+  if (navigator.storage && navigator.storage.persisted) {
+    navigator.storage.persisted().then((p) => {
+      const el = $('storage-line');
+      if (el) el.textContent = p ? '保存領域: 保護あり（persist許可済み）' : '保存領域: 保護なし（容量不足時にOSが削除する可能性）';
+    }).catch(() => {});
+  } else { const el = $('storage-line'); if (el) el.textContent = '保存領域: 状態不明'; }
 
   main.appendChild(h(`<div class="cat-head">バックアップ</div>`));
   const exp = h(`<div>
     <button class="ghost" id="exp-json" style="margin-bottom:8px">JSONで書き出し（バックアップ）</button>
     <button class="ghost" id="exp-tsv" style="margin-bottom:8px">TSVで書き出し（スプレッドシート形式）</button>
     <div class="field"><label>JSONから復元 / 取り込み（マージ）</label><input type="file" id="imp-json" accept="application/json,.json"></div>
+    <div class="hint">iCloudに残すには:「JSONで書き出し」→共有シートの<b>「"ファイル"に保存」→iCloud Drive</b>を選択。ホーム画面からアプリを削除すると記録も一緒に消えるため、定期的なバックアップを推奨します。</div>
   </div>`);
   main.appendChild(exp);
   $('exp-json').onclick = exportJSON;
@@ -590,10 +617,38 @@ function download(filename, text, type) {
   const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click();
   setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 500);
 }
-function exportJSON() {
+async function markBackedUp() {
+  state.lastBackupAt = Date.now();
+  await metaSet('lastBackupAt', state.lastBackupAt);
+  if (state.tab === 'data') renderData();
+}
+async function exportJSON() {
   const data = { app: 'training-log', version: 1, exportedAt: new Date().toISOString(), exercises: DB.exercises, sessions: DB.sessions, logs: DB.logs };
-  download(`training-log-backup-${todayStr()}.json`, JSON.stringify(data), 'application/json');
+  const filename = `training-log-backup-${todayStr()}.json`;
+  const text = JSON.stringify(data);
+  // iOSでは共有シートの「"ファイル"に保存」→ iCloud Drive でiCloudにバックアップできる
+  if (navigator.share && navigator.canShare) {
+    const file = new File([text], filename, { type: 'application/json' });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+        toast('バックアップを書き出しました');
+        await markBackedUp();
+      } catch (err) { /* 共有キャンセル時は何もしない */ }
+      return;
+    }
+  }
+  download(filename, text, 'application/json');
   toast('JSONを書き出しました');
+  await markBackedUp();
+}
+// 新しい記録があるのに2週間以上バックアップしていない
+function backupDue() {
+  if (!DB.logs.length) return false;
+  if (Date.now() < (state.backupSnoozeUntil || 0)) return false;
+  const last = state.lastBackupAt || 0;
+  const newest = DB.logs.reduce((a, l) => Math.max(a, l.updatedAt || 0), 0);
+  return newest > last && Date.now() - last > 14 * 86400e3;
 }
 function exportTSV() {
   // 種目(行) × セッション(列) の wide 形式で再構成
@@ -815,6 +870,10 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheet.op
     _db = await openDB();
     await loadAll();
     state.location = await metaGet('lastLocation', '');
+    state.lastBackupAt = await metaGet('lastBackupAt', 0);
+    state.backupSnoozeUntil = await metaGet('backupSnoozeUntil', 0);
+    // OSの容量整理でIndexedDBが消されにくくなるよう保護を要求
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   } catch (err) {
     document.getElementById('main').innerHTML = '<div class="empty">起動に失敗しました: ' + esc(err.message) + '</div>';
     return;
