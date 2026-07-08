@@ -532,7 +532,7 @@ function renderData() {
     <div id="imp-result"></div>
     <div class="hint">既定値はあなたの形式（A列=部位, B列=種目名, 1行目=日付, 2行目=場所, 3行目からデータ）に合わせてあります。ズレる時だけ数値を変えて再プレビュー。<br>
       見出しが日付でも中身が種目名の列は日付列から自動除外します（種目名列に日付が混ざっても誤爆しません）。<br>
-      年は列に書かれていないため、左端(最古)列の年を起点に、月がリセットされるたびに翌年へ繰り上げて推定します。<b>プレビューの「種目名の例」と期間を必ず確認</b>してから取り込んでください。</div>
+      年は「月日＋曜日」の組み合わせから自動で確定します（7/6(月) のような曜日つき見出しに対応。日付順が前後する列があってもOK。再取り込みしても重複しません）。曜日が無い見出しの場合のみ、左端(最古)列の年を起点に月が戻るたびに翌年として推定します。<b>プレビューの期間と「種目名の例」を必ず確認</b>してから取り込んでください。</div>
   </div>`);
   main.appendChild(imp);
   $('imp-file').onchange = (e) => { const f = e.target.files[0]; if (f) f.text().then((t) => { $('imp-text').value = t; toast('読み込みました。プレビューを押してください'); }); };
@@ -717,12 +717,14 @@ function parseDelimited(text) {
 }
 const DATE_RE = /(\d{1,2})\s*[\/月.\-]\s*(\d{1,2})/;
 function parseSetCell(cell) {
+  // "w,r,s" の繰り返しを全部拾う。区切りは改行でもスペースでもよい
+  // （Googleスプレッドシートの書き出しでセル内改行がスペースになることがある）
   if (!cell) return [];
-  return cell.split(/[\n\r]+/).map((line) => {
-    const m = line.trim().match(/^(-?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+)/);
-    if (!m) return null;
-    return { w: parseFloat(m[1]), r: parseFloat(m[2]), s: parseInt(m[3], 10) || 1 };
-  }).filter(Boolean);
+  const out = [];
+  const re = /(-?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+)/g;
+  let m;
+  while ((m = re.exec(cell))) out.push({ w: parseFloat(m[1]), r: parseFloat(m[2]), s: parseInt(m[3], 10) || 1 });
+  return out;
 }
 
 function isSetCellText(s) { return /^\s*-?\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+/.test((s || '').split(/[\n\r]+/)[0] || ''); }
@@ -762,11 +764,47 @@ function previewGridImport() {
   }
   if (!dataCols.length) { resultEl.innerHTML = `<div class="hint" style="color:var(--danger)">日付列を検出できませんでした。「日付の行」が正しいか、1行目に 7/2(木) のような日付が並んでいるか確認してください。</div>`; return; }
 
-  // 年推定: 左端(最古)の年から、月がリセット(m<前のm)するたびに+1
-  let year = parseInt($('imp-year').value, 10) || (new Date().getFullYear() - 5);
-  let prevM = -1;
+  // 年推定: 見出しに曜日があれば「月日+曜日」の組み合わせで年を確定する（ほぼ一意に決まる）。
+  // 日付順が前後している列（後から挿入した過去の記録など）は直前より過去の日付として解釈し、
+  // 未来の日付は生成しない。曜日が無い列は従来の「月が戻ったら翌年」で推定。
+  const WD_RE = /[（(]\s*([月火水木金土日])\s*[)）]/;
+  const baseYear = parseInt($('imp-year').value, 10) || (new Date().getFullYear() - 5);
+  const todayS = todayStr();
+  const maxY = parseInt(todayS.slice(0, 4), 10);
+  const mkDate = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const validYMD = (y, m, d) => { const t = new Date(y, m - 1, d); return t.getMonth() === m - 1 && t.getDate() === d; };
   const colDate = {};
-  dataCols.forEach((dc) => { const [m, d] = dc.m; if (prevM !== -1 && m < prevM) year++; prevM = m; colDate[dc.col] = `${year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`; });
+  let cursor = null, outOfOrder = 0, wdMismatch = 0;
+  dataCols.forEach((dc) => {
+    const [m, d] = dc.m;
+    const wd = ((dateRow[dc.col] || '').match(WD_RE) || [])[1] || null;
+    let chosen = null;
+    if (wd) {
+      const cands = [];
+      const startY = (cursor ? parseInt(cursor, 10) : baseYear) - 7;
+      for (let y = startY; y <= maxY; y++) {
+        if (!validYMD(y, m, d)) continue;
+        const ds = mkDate(y, m, d);
+        if (ds > todayS) continue;
+        if (WD[new Date(y, m - 1, d).getDay()] === wd) cands.push(ds);
+      }
+      if (!cands.length) wdMismatch++;
+      else if (!cursor) {
+        chosen = cands.reduce((a, b) => (Math.abs(parseInt(b, 10) - baseYear) < Math.abs(parseInt(a, 10) - baseYear) ? b : a));
+      } else {
+        const later = cands.filter((ds) => ds > cursor);
+        if (later.length) chosen = later[0];
+        else { chosen = cands[cands.length - 1]; outOfOrder++; }
+      }
+    }
+    if (!chosen) {
+      let y = cursor ? parseInt(cursor, 10) : baseYear;
+      if (cursor && m < parseInt(cursor.slice(5, 7), 10)) y++;
+      chosen = mkDate(y, m, d);
+    }
+    colDate[dc.col] = chosen;
+    if (!cursor || chosen > cursor) cursor = chosen;
+  });
 
   // 集計。部位(カテゴリ)は結合セル対策で空欄なら直前の値を継承（前方補完）。
   const exNames = []; const catByName = {}; let logCount = 0, setCount = 0;
@@ -798,6 +836,8 @@ function previewGridImport() {
     <div class="label" style="margin-top:8px">種目名の例（部位 / 種目名）</div>
     ${sample.map((s) => `<div class="prev-line">${esc(s)}</div>`).join('') || '<div class="prev-line">-</div>'}
   </div>`));
+  if (outOfOrder) resultEl.appendChild(h(`<div class="hint">日付順が前後している列が ${outOfOrder} 件ありました。後から挿入された過去の記録として解釈しています。</div>`));
+  if (wdMismatch) resultEl.appendChild(h(`<div class="hint" style="color:var(--danger)">曜日と月日が一致しない列が ${wdMismatch} 件あります。取り込み後にデータタブの「セッション診断」で日付を確認してください。</div>`));
   const badName = exNames.length <= 12 && exNames.every((n) => n.length <= 2);
   if (badName) resultEl.appendChild(h(`<div class="hint" style="color:var(--danger)">種目名が部位名(胸/背 等)ばかりのようです。列指定が逆かも。「部位の列」「種目名の列」を確認して再プレビューしてください。</div>`));
   if (dates.length && (dates[0] < '1990' || dates[dates.length - 1] > String(new Date().getFullYear() + 1))) {
@@ -826,12 +866,16 @@ async function commitGridImport() {
     // セッション
     const sesByKey = {};
     for (const s of p.sessions) { const cur = await getOrCreateSession(s.date, s.location); sesByKey[sessionKey(s.date, s.location)] = cur; }
-    // 記録（同一種目×セッションはマージせず置換：同じ列に複数値は無い前提）
+    // 記録: 取り込み前から存在した記録は置換（同じTSVを再取り込みしても重複しない）。
+    // 同一取り込み内で同じ(種目,セッション)になった複数列は併合。
+    const touched = new Set();
     for (const e of p.entries) {
       const ex = exByName[e.name] || await addExercise(e.cat, e.name);
       const ses = sesByKey[sessionKey(e.date, e.location)] || await getOrCreateSession(e.date, e.location);
+      const key = ex.id + '|' + ses.id;
       const existing = logFor(ex.id, ses.id);
-      const merged = existing ? existing.sets.concat(e.sets) : e.sets;
+      const merged = existing && touched.has(key) ? existing.sets.concat(e.sets) : e.sets;
+      touched.add(key);
       await saveLog(ex.id, ses.id, merged);
     }
     _pendingImport = null;
