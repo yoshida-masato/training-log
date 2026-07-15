@@ -311,7 +311,7 @@ async function openLog(ex) {
   const body = h(`<div>
     <div id="prev-wrap"></div>
     <div class="steppers">
-      ${stepper('重量', 'w', cur.w, 'kg')}
+      ${stepper('重量', 'w', cur.w, 'kg', true)}
       ${stepper('レップ', 'r', cur.r, '')}
       ${stepper('セット', 's', cur.s, '')}
     </div>
@@ -350,7 +350,7 @@ async function openLog(ex) {
   function syncSteppers() { ['w', 'r', 's'].forEach((k) => { const el = body.querySelector(`#st-${k} .val input`); if (el) el.value = trimNum(cur[k]); }); }
 
   // stepper handlers
-  bindStepper(body, 'w', cur, 2.5, 0, persist);
+  bindStepper(body, 'w', cur, 2.5, null, persist);
   bindStepper(body, 'r', cur, 1, 0, persist);
   bindStepper(body, 's', cur, 1, 1, persist);
 
@@ -373,27 +373,35 @@ async function openLog(ex) {
 }
 function refreshBadgeLater() { if (state.tab === 'home') renderHomeList(); }
 
-function stepper(cap, key, val, unit) {
+function stepper(cap, key, val, unit, sign) {
   return `<div class="stepper" id="st-${key}">
     <div class="cap">${cap}${unit ? ' (' + unit + ')' : ''}</div>
     <div class="val"><input inputmode="decimal" value="${trimNum(val)}" /></div>
-    <div class="btns"><button data-d="-1">−</button><button data-d="1">＋</button></div>
+    <div class="btns">${sign ? '<button data-sign>±</button>' : ''}<button data-d="-1">−</button><button data-d="1">＋</button></div>
   </div>`;
 }
+// min=null で下限なし（マイナス可）
 function bindStepper(root, key, cur, step, min, onchange) {
   const box = root.querySelector(`#st-${key}`);
   const input = box.querySelector('.val input');
-  box.querySelectorAll('.btns button').forEach((b) => {
+  const set = (v) => {
+    if (min != null && v < min) v = min;
+    v = Math.round(v * 100) / 100;
+    cur[key] = v; input.value = trimNum(v);
+  };
+  box.querySelectorAll('.btns button[data-d]').forEach((b) => {
     b.onclick = () => {
-      const d = Number(b.dataset.d) * step;
-      let v = (parseFloat(input.value) || 0) + d;
-      if (v < min) v = min;
-      v = Math.round(v * 100) / 100;
-      cur[key] = v; input.value = trimNum(v);
+      set((parseFloat(input.value) || 0) + Number(b.dataset.d) * step);
       if (navigator.vibrate) navigator.vibrate(8);
     };
   });
-  input.onchange = () => { let v = parseFloat(input.value); if (isNaN(v)) v = min; if (v < min) v = min; cur[key] = v; input.value = trimNum(v); };
+  const sign = box.querySelector('.btns button[data-sign]');
+  if (sign) sign.onclick = () => {
+    const v = parseFloat(input.value) || 0;
+    if (v) set(-v);
+    if (navigator.vibrate) navigator.vibrate(8);
+  };
+  input.onchange = () => { let v = parseFloat(input.value); if (isNaN(v)) v = min != null ? min : 0; set(v); };
   input.onfocus = () => input.select();
 }
 
