@@ -134,12 +134,19 @@ async function addExercise(category, name) {
   DB.exercises.push(e); await idbPut('exercises', e); return e;
 }
 function findExerciseByName(name) { const n = name.trim(); return DB.exercises.find((e) => e.name === n); }
+// 部位の表示順: state.catOrder が優先。載っていない部位は種目の並びから導出して末尾に
 function categories() {
   const set = [];
   DB.exercises.slice().sort(byOrder).forEach((e) => { const c = e.category || 'その他'; if (!set.includes(c)) set.push(c); });
-  return set;
+  const idx = (c) => { const i = state.catOrder.indexOf(c); return i === -1 ? 1e9 : i; };
+  return set.sort((a, b) => idx(a) - idx(b));
 }
 const byOrder = (a, b) => (a.order || 0) - (b.order || 0);
+// 表示用ソート: 部位順 → 部位内の order 順（order が部位をまたいで交錯していても部位ごとにまとまる）
+function sortForDisplay(list) {
+  const idx = new Map(categories().map((c, i) => [c, i]));
+  return list.slice().sort((a, b) => (idx.get(a.category || 'その他') - idx.get(b.category || 'その他')) || byOrder(a, b));
+}
 
 /* ---------- Set formatting ---------- */
 function fmtSet(st) { return st.s > 1 ? `${trimNum(st.w)}×${st.r} ×${st.s}` : `${trimNum(st.w)}×${st.r}`; }
@@ -148,7 +155,8 @@ function summarizeSets(sets) { return sets.map(fmtSet).join(', '); }
 function totalSetCount(sets) { return sets.reduce((a, s) => a + (s.s || 1), 0); }
 
 /* ---------- App state ---------- */
-const state = { tab: 'home', date: todayStr(), location: '', query: '', cat: '__all', histExerciseId: null };
+const DEFAULT_CAT_ORDER = ['胸', '背', '肩', '二頭', '三頭', '腹', '脚'];
+const state = { tab: 'home', date: todayStr(), location: '', query: '', cat: '__all', histExerciseId: null, catOrder: DEFAULT_CAT_ORDER };
 
 /* ---------- Rendering ---------- */
 const $ = (id) => document.getElementById(id);
@@ -226,7 +234,7 @@ function renderHomeList() {
   const sess = findSession(state.date, state.location);
   const sessId = sess ? sess.id : null;
   const q = state.query.trim().toLowerCase();
-  let list = DB.exercises.slice().sort(byOrder);
+  let list = sortForDisplay(DB.exercises);
   if (state.cat !== '__all') list = list.filter((e) => (e.category || 'その他') === state.cat);
   if (q) list = list.filter((e) => e.name.toLowerCase().includes(q) || (e.category || '').toLowerCase().includes(q));
 
@@ -419,8 +427,14 @@ function renderExercises() {
     await addExercise($('ne-cat').value, name); $('ne-name').value = ''; renderExercises(); toast('追加しました');
   };
   const cats = categories();
-  cats.forEach((c) => {
-    main.appendChild(h(`<div class="cat-head">${esc(c)}</div>`));
+  cats.forEach((c, ci) => {
+    const head = h(`<div class="cat-head" style="display:flex;align-items:center;gap:8px">
+        <span style="flex:1">${esc(c)}</span>
+        ${ci > 0 ? '<button class="chip cat-up">部位を上へ ↑</button>' : ''}
+      </div>`);
+    const cu = head.querySelector('.cat-up');
+    if (cu) cu.onclick = () => moveCategoryUp(c);
+    main.appendChild(head);
     DB.exercises.filter((e) => (e.category || 'その他') === c).sort(byOrder).forEach((e) => {
       const row = h(`<div class="list-manage-row"><div class="info"><div>${esc(e.name)}</div></div>
         <button class="up">↑</button><button class="edit">編集</button><button class="del">削除</button></div>`);
@@ -432,13 +446,24 @@ function renderExercises() {
   });
   if (!DB.exercises.length) main.appendChild(h(`<div class="empty">種目がありません。上から追加、または「データ」で取り込み。</div>`));
 }
+// 同じ部位の中だけで1つ上に移動（部位をまたいで order を入れ替えると部位の並びが崩れるため）
 async function moveExerciseUp(e) {
-  const sorted = DB.exercises.slice().sort(byOrder);
+  const cat = e.category || 'その他';
+  const sorted = DB.exercises.filter((x) => (x.category || 'その他') === cat).sort(byOrder);
   const i = sorted.findIndex((x) => x.id === e.id);
   if (i <= 0) return;
   const prev = sorted[i - 1];
   const t = e.order; e.order = prev.order; prev.order = t;
   await Promise.all([idbPut('exercises', e), idbPut('exercises', prev)]);
+  renderExercises();
+}
+async function moveCategoryUp(c) {
+  const cats = categories();
+  const i = cats.indexOf(c);
+  if (i <= 0) return;
+  cats.splice(i, 1); cats.splice(i - 1, 0, c);
+  state.catOrder = cats;
+  await metaSet('catOrder', cats);
   renderExercises();
 }
 function editExercise(e) {
@@ -472,12 +497,12 @@ function renderHistory() {
   const sel = h(`<div class="field"><label>種目</label><select id="hist-sel"></select></div>`);
   main.appendChild(sel);
   const s = sel.querySelector('#hist-sel');
-  DB.exercises.slice().sort(byOrder).forEach((e) => {
+  sortForDisplay(DB.exercises).forEach((e) => {
     const o = h(`<option value="${e.id}">${esc((e.category ? e.category + ' / ' : '') + e.name)}</option>`);
     if (e.id === state.histExerciseId) o.selected = true;
     s.appendChild(o);
   });
-  if (!state.histExerciseId && DB.exercises.length) state.histExerciseId = DB.exercises.slice().sort(byOrder)[0].id;
+  if (!state.histExerciseId && DB.exercises.length) state.histExerciseId = sortForDisplay(DB.exercises)[0].id;
   s.onchange = () => { state.histExerciseId = s.value; renderHistory(); };
   const wrap = h(`<div id="hist-list" style="margin-top:6px"></div>`); main.appendChild(wrap);
   if (!state.histExerciseId) { wrap.innerHTML = `<div class="empty">種目がありません。</div>`; return; }
@@ -631,7 +656,7 @@ async function markBackedUp() {
   if (state.tab === 'data') renderData();
 }
 async function exportJSON() {
-  const data = { app: 'training-log', version: 1, exportedAt: new Date().toISOString(), exercises: DB.exercises, sessions: DB.sessions, logs: DB.logs };
+  const data = { app: 'training-log', version: 1, exportedAt: new Date().toISOString(), exercises: DB.exercises, sessions: DB.sessions, logs: DB.logs, catOrder: state.catOrder };
   const filename = `training-log-backup-${todayStr()}.json`;
   const text = JSON.stringify(data);
   // iOSでは共有シートの「"ファイル"に保存」→ iCloud Drive でiCloudにバックアップできる
@@ -661,7 +686,7 @@ function backupDue() {
 function exportTSV() {
   // 種目(行) × セッション(列) の wide 形式で再構成
   const sessions = DB.sessions.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const exs = DB.exercises.slice().sort(byOrder);
+  const exs = sortForDisplay(DB.exercises);
   const rows = [];
   rows.push(['', ''].concat(sessions.map((s) => fmtDate(s.date))));
   rows.push(['', 'kg,rep,set'].concat(sessions.map((s) => s.location || '')));
@@ -698,6 +723,7 @@ async function importJSONFile(file) {
       if (!eid || !sid || !Array.isArray(l.sets)) continue;
       await saveLog(eid, sid, l.sets.map((s) => ({ w: +s.w, r: +s.r, s: +s.s || 1 })));
     }
+    if (Array.isArray(data.catOrder) && data.catOrder.length) { state.catOrder = data.catOrder; await metaSet('catOrder', data.catOrder); }
     toast('取り込みました'); render();
   } catch (err) { toast('読み込み失敗: ' + err.message); }
 }
@@ -924,6 +950,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheet.op
     state.location = await metaGet('lastLocation', '');
     state.lastBackupAt = await metaGet('lastBackupAt', 0);
     state.backupSnoozeUntil = await metaGet('backupSnoozeUntil', 0);
+    state.catOrder = await metaGet('catOrder', DEFAULT_CAT_ORDER);
     // OSの容量整理でIndexedDBが消されにくくなるよう保護を要求
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   } catch (err) {
