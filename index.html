@@ -144,7 +144,11 @@
     .stepper .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0; }
     .stepper .val input { width: 100%; background: none; border: none; color: var(--text); font-size: 26px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
     .stepper .btns { display: flex; gap: 6px; }
-    .stepper .btns button { flex: 1; background: var(--surface2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 0; font-size: 16px; }
+    .stepper .btns button { flex: 1; background: var(--surface2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 0; font-size: 16px; min-height: 44px; }
+    /* ±は使用頻度が低い補助ボタンなので幅を固定し、−/＋に幅を譲る */
+    .stepper .btns button[data-sign] { flex: 0 0 34px; font-size: 14px; color: var(--muted); }
+    /* 重量列はボタンが3つあるぶん広めに取る */
+    #st-w { flex: 1.5; }
 
     .btn-row { display: flex; gap: 8px; }
     button.primary { background: var(--accent); color: #0b0f0c; border: none; border-radius: 12px; padding: 14px; font-size: 16px; font-weight: 700; flex: 1; }
