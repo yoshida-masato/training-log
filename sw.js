@@ -1,6 +1,6 @@
 // Service Worker: アプリシェルをキャッシュして即起動・オフライン動作を実現する。
 // データは IndexedDB（アプリ側）にあり、ここではキャッシュしない。
-const CACHE = 'training-log-v7';
+const CACHE = 'training-log-v8';
 const SHELL = [
   './',
   './index.html',
